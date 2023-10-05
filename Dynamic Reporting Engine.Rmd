@@ -1,0 +1,417 @@
+---
+title: "HHA"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(rmarkdown)
+library(knitr)
+library(Hmisc)
+library(DT)
+library(data.table)
+library(corrplot)
+library(dplyr)
+library(ggplot2)
+library(glmnet)
+library(mice)
+library(purrr)
+assignInNamespace("cedta.override", c(data.table:::cedta.override,"rmarkdown"), "data.table")
+
+
+opts_chunk$set(echo = FALSE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55), tidy = TRUE)
+
+```
+
+```{r source_functions}
+source("functions.R")
+```
+
+
+```{css}
+.datatables.html-widget.html-widget-static-bound{
+  height: auto !important;
+  width: 90vw !important;
+}
+.dataTables_scrollBody{
+  height: unset !important;
+}
+```
+
+```{r functions}
+
+top.n.select <- function(id, title){
+  selectInput(inputId = id, label = title, choices = c("", 5,10,20))
+}
+
+digits.select <- function(id, title){
+  selectInput(inputId = id, label = title, choices = c(0,1,2,3), selected = 2)
+}
+
+custom.select <- function(id, title, vars, multiple.select = T){
+  selectInput(inputId = id,
+              label = title,
+              choices = vars,
+              selected = ifelse(multiple.select == T, vars, vars[1]),
+              multiple = multiple.select)
+}
+
+percentage.checkbox <- function(id,title){
+  checkboxInput(inputId = id, label= title, value = T)
+}
+
+
+get.q1.id = function(id){return (paste0("q1_",id))}
+
+get.q2.id = function(id){return (paste0("q2_",id))}
+
+get.q3.id = function(id){return (paste0("q3_",id))}
+
+get.q4.id = function(id){return (paste0("q4_",id))}
+
+get.q5.id = function(id){return (paste0("q5_",id))}
+
+get.q6.id = function(id){return (paste0("q6_",id))}
+```
+
+```{r load_data}
+HHA = read.csv("HHA All Providers.csv")
+HHA = HHA[!is.na(HHA$Quality.of.Patient.Care.Star.Rating), ]
+```
+
+```{r constants}
+# how.cols <- colnames(PPR)[18:33]
+# Offers.Cols <- colnames(PPR)[9:14]
+```
+
+```{r clean_data}
+#Create two data frames for further analysis
+#HHA_common is a data frame that contains common and numerical variables (excluding PPR-related variables) from 2015 to 2022
+HHA_common = HHA[, c(1:4, 6:7, 9:21, 23, 26:27, 29, 31:32)]
+
+#HHA_PPR is a data frame that contains common and numerical variables from 2019 to 2022 particularly for PPR-related analysis
+HHA_PPR = HHA[, c(1:4, 6:7, 9:21, 23, 26:27, 29, 31:32, 34, 46:62)]
+HHA_PPR = HHA_PPR[HHA_PPR$Year == 2019 | HHA_PPR$Year == 2020 | HHA_PPR$Year == 2021 | HHA_PPR$Year == 2022, ]
+HHA_PPR = HHA_PPR[!is.na(HHA_PPR$DTC.Observed.Rate), ]
+
+#Data frames below contain results from respective years for detailed analysis
+HHA_15_16 = HHA[HHA$Year == 2015 | HHA$Year == 2016, ][, c(9:33, 35:43)]
+HHA_17_18 = HHA[HHA$Year == 2017 | HHA$Year == 2018, ][, c(9:29, 31:33, 35:38)]
+HHA_19 = HHA[HHA$Year == 2019, ][, c(9:29, 31:38, 44:45, 47:62)]
+HHA_20 = HHA[HHA$Year == 2020, ][, c(9:29, 31:32, 34, 46:62)]
+HHA_21_22 = HHA[HHA$Year == 2021 | HHA$Year == 2022, ][, c(9:21, 23, 26:27, 29, 31:32, 34, 46:62)]
+```
+
+```{r define_variables}
+#Survey items in 2015 and 2016
+items_2015 = c("Quality.of.Patient.Care.Star.Rating", "How.often.the.home.health.team.began.their.patients..care.in.a.timely.manner", "How.often.the.home.health.team.taught.patients..or.their.family.caregivers..about.their.drugs", "How.often.the.home.health.team.determined.whether.patients.received.a.flu.shot.for.the.current.flu.season", "How.often.the.home.health.team.checked.patients..risk.of.falling", "How.often.patients.got.better.at.walking.or.moving.around", "How.often.the.home.health.team.checked.patients.for.depression", "How.often.the.home.health.team.made.sure.that.their.patients.have.received.a.pneumococcal.vaccine..pneumonia.shot..", "How.often.patients.got.better.at.getting.in.and.out.of.bed", "How.often.patients.got.better.at.bathing", "With.diabetes..how.often.the.home.health.team.got.doctor.s.orders..gave.foot.care..and.taught.patients.about.foot.care", "How.often.patients.got.better.at.taking.their.drugs.correctly.by.mouth", "How.often.the.home.health.team.checked.patients.for.pain", "How.often.patients.had.less.pain.when.moving.around", "How.often.patients..breathing.improved", "How.often.patients..wounds.improved.or.healed.after.an.operation", "How.often.the.home.health.team.treated.their.patients..pain", "How.often.the.home.health.team.treated.heart.failure..weakening.of.the.heart..patients..symptoms", "How.often.the.home.health.team.took.doctor.ordered.action.to.prevent.pressure.sores..bed.sores.", "How.often.the.home.health.team.included.treatments.to.prevent.pressure.sores..bed.sores..in.the.plan.of.care", "How.often.the.home.health.team.checked.patients.for.the.risk.of.developing.pressure.sores..bed.sores." )
+
+#Survey items in 2021 and 2022
+items_2021 = c("Quality.of.Patient.Care.Star.Rating", "How.often.the.home.health.team.began.their.patients..care.in.a.timely.manner", "How.often.the.home.health.team.taught.patients..or.their.family.caregivers..about.their.drugs", "How.often.the.home.health.team.determined.whether.patients.received.a.flu.shot.for.the.current.flu.season", "How.often.patients.got.better.at.walking.or.moving.around", "How.often.patients.got.better.at.getting.in.and.out.of.bed", "How.often.patients.got.better.at.bathing", "How.often.patients.got.better.at.taking.their.drugs.correctly.by.mouth", "How.often.patients.receiving.home.health.care.needed.urgent..unplanned.care.in.the.ER.without.being.admitted", "How.often.home.health.patients.had.to.be.admitted.to.the.hospital", "How.often.physician.recommended.actions.to.address.medication.issues.were.completely.timely", "Changes.in.skin.integrity.post.acute.care..pressure.ulcer.injury", "DTC.Observed.Rate", "DTC.Risk.Standardized.Rate", "PPR.Observed.Rate", "PPR.Risk.Standardized.Rate", "How.much.Medicare.spends.on.an.episode.of.care.at.this.agency..compared.to.Medicare.spending.across.all.agencies.nationally", "No..of.episodes.to.calc.how.much.Medicare.spends.per.episode.of.care.at.agency..compared.to.spending.at.all.agencies..national.")
+```
+
+
+```{r function}
+# Initialize a list to store the best Type.of.Ownership for each column based on mean and median
+best_performers_mean_2015 = list()
+best_performers_median_2015 = list()
+
+# Loop through each column name and find the Type.of.Ownership with the highest mean and median
+for (col_name in items_2015) {
+  # Calculate mean and median for each Type.of.Ownership
+  result_df = HHA_15_16 %>%
+    group_by(Type.of.Ownership) %>%
+    summarize(mean_value = mean(!!sym(col_name)),
+              median_value = median(!!sym(col_name)))
+  
+  # Find the row with the highest mean_value
+  best_mean_row = result_df[which.max(result_df$mean_value), ]
+  best_mean_row$Performance_Measure = "Mean"
+  best_mean_row$Column_Name = col_name
+  
+  # Find the row with the highest median_value
+  best_median_row = result_df[which.max(result_df$median_value), ]
+  best_median_row$Performance_Measure = "Median"
+  best_median_row$Column_Name = col_name
+  
+  # Store the summary tables in the respective lists
+  best_performers_mean_2015[[col_name]] = best_mean_row
+  best_performers_median_2015[[col_name]] = best_median_row
+}
+
+# Initialize a list to store the best Type.of.Ownership for each column based on mean and median
+best_performers_mean_2021 = list()
+best_performers_median_2021 = list()
+
+# Loop through each column name and find the Type.of.Ownership with the highest mean and median
+for (col_name in items_2021) {
+  # Calculate mean and median for each Type.of.Ownership
+  result_df = HHA_21_22 %>%
+    group_by(Type.of.Ownership) %>%
+    summarize(mean_value = mean(!!sym(col_name)),
+              median_value = median(!!sym(col_name)))
+  
+  # Find the row with the highest mean_value
+  best_mean_row = result_df[which.max(result_df$mean_value), ]
+  best_mean_row$Performance_Measure = "Mean"
+  best_mean_row$Column_Name = col_name
+  
+  # Find the row with the highest median_value
+  best_median_row = result_df[which.max(result_df$median_value), ]
+  best_median_row$Performance_Measure = "Median"
+  best_median_row$Column_Name = col_name
+  
+  # Store the summary tables in the respective lists
+  best_performers_mean_2021[[col_name]] = best_mean_row
+  best_performers_median_2021[[col_name]] = best_median_row
+}
+
+corrplot.output <- function(dat){
+  #Generating correlation heat map with common data
+  #Identify the numerical columns (excluding the "quality score" column)
+  numerical_columns = dat[, sapply(dat, is.numeric)]
+  #Exclude the "quality score" column from the numerical columns
+  numerical_data = numerical_columns[, !names(numerical_columns) %in% "Quality.of.Patient.Care.Star.Rating"]
+  #Calculate the correlation matrix between "quality score" and other numerical variables
+  cor_matrix = cor(numerical_data, dat$Quality.of.Patient.Care.Star.Rating, use = "pairwise.complete.obs")
+  #Create the correlation heat map
+  corrplot(cor_matrix, method = "color", tl.cex = 0.7)
+}
+
+
+correlation.output.PPR <- function(observed.rate) {
+  cor_coef = cor(HHA_PPR$Quality.of.Patient.Care.Star.Rating, observed.rate, use = "complete.obs")
+  cor_test = cor.test(HHA_PPR$Quality.of.Patient.Care.Star.Rating, observed.rate, method = "pearson")
+  return(data.table(`Correlation Coefficient` = cor_coef, `P-Value` = cor_test$p.value))
+  
+}
+
+correlation.output.common <- function(dat,observed.rate) {
+  cor_coef = cor(dat$Quality.of.Patient.Care.Star.Rating, observed.rate, use = "complete.obs")
+  cor_test = cor.test(dat$Quality.of.Patient.Care.Star.Rating, observed.rate, method = "pearson")
+  return(data.table(`Correlation Coefficient` = cor_coef, `P-Value` = cor_test$p.value))
+  
+}
+
+anova.output.PPR <- function(input.name){
+  the.formula <- as.formula(paste0("Quality.of.Patient.Care.Star.Rating ~ ", input.name ))
+  model_dtc = lm(the.formula, data = HHA_PPR)
+  return(anova(model_dtc))
+}
+
+t.test.output <- function(x){
+  y = HHA_common[x == 1, "Quality.of.Patient.Care.Star.Rating" ]
+  n = HHA_common[x == 0, "Quality.of.Patient.Care.Star.Rating"]
+  if (length(n) == 0){
+    return(data.table(`Correlation Coefficent` = 0, p.value = 0))
+  }
+   if (length(y) == 0){
+    return(data.table(`Correlation Coefficent` = 0, p.value = 0))
+   }
+  t.test.var <- t.test(y,n)
+  return(data.table(`Correlation Coefficent`= t.test.var$statistic, p.value = t.test.var$p.value))
+}
+```
+
+
+
+
+Introduction
+=====================================  
+
+We are analyzing data of home health care agencies (HHA) to understand the relationship between their services, ownership types, agency age, and patient care outcomes.
+
+The data that was analyzed contains information on multiple HHAs from 2015 to 2022.
+
+All correlations are based on Quality of Patient Rating
+
+Select the different tabs to proceed with the different analysis and visualizations.
+
+
+Influential Variables
+===================================
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r q1_input}
+inputPanel(
+  custom.select(get.q1.id("inputs"),"Choose Inputs:",c("PPR","common"),F)
+)
+```
+
+
+```{r q1_output}
+renderPlot({
+  dat <- HHA_PPR
+  if(input$q1_inputs=="common"){
+    dat <- HHA_common
+  }
+  corrplot.output(dat)
+})
+```
+
+Correlation of PPR/DTC 
+=====================================  
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r q2_input}
+inputPanel(
+  custom.select(get.q2.id("inputs"), "Choose Inputs:", c("PPR", "DTC"), F)
+)
+```
+
+Row {data-height=500}
+-------------------------------------
+
+```{r q2_output}
+
+HTML("<h3>Correlation</h3><br>")
+renderDataTable({
+  observed.rate <- HHA_PPR$PPR.Observed.Rate
+  if(input$q2_inputs == "DTC"){
+    observed.rate <- HHA_PPR$DTC.Observed.Rate
+  }
+  correlation.output.PPR(observed.rate)
+})
+
+HTML("<h3>Performance Categorization</h3><br>")
+renderDataTable({
+ performance.categorization <- "PPR.Performance.Categorization"
+  if(input$q2_inputs == "DTC"){
+    performance.categorization <- "DTC.Performance.Categorization"
+  }
+  anova.output.PPR(performance.categorization)
+})
+
+```
+
+
+Correlation of Service Offerings
+=====================================  
+
+Row {data-height=500}
+-------------------------------------
+
+
+```{r q3_input}
+service.cols <- HHA_common%>%select(ends_with("Services"))
+
+inputPanel(
+  custom.select(get.q3.id("inputs"), "Choose Inputs:", names(service.cols),F)
+)
+```
+
+Row {data-height=500}
+-------------------------------------
+
+```{r q3_output}
+renderDataTable({
+  t.test.output(HHA_common%>%select(input$q3_inputs))
+})
+```
+
+Ownership Type
+=====================================  
+
+Row {data-height=500}
+-------------------------------------
+
+```{r q4_input}
+inputPanel(
+  sliderInput(inputId = get.q4.id("inputs"), label = "Select Year", min = HHA_common%>%select(Year)%>%min(), max = HHA_common%>%select(Year)%>%max(), value = 2015, step = 1)
+)
+```
+
+
+```{r q4_output}
+renderPlot({
+  year <- input$q4_inputs
+  res_trend = HHA_common %>%filter(Year>=year) %>%
+  group_by(Type.of.Ownership, Year) %>%
+  summarise(Mean = mean(Quality.of.Patient.Care.Star.Rating), Median = median(Quality.of.Patient.Care.Star.Rating), SD = sd(Quality.of.Patient.Care.Star.Rating))
+  #res_trend
+
+ggplot(res_trend, aes(x = Year, y = Mean, color = Type.of.Ownership, group = Type.of.Ownership)) +
+  geom_line() +
+  labs(title = "Mean Quality of Patient Care Star Rating by Ownership Type over Years",
+       x = "Year",
+       y = "Mean Quality of Patient Care Star Rating",
+       color = "Type of Ownership") +
+  theme_minimal() +
+  ylim(2.75, 3.5)
+
+})
+
+renderPlot({
+  year <- input$q4_inputs
+  res_trend = HHA_common %>%filter(Year>=year) %>%
+  group_by(Type.of.Ownership, Year) %>%
+  summarise(Mean = mean(Quality.of.Patient.Care.Star.Rating), Median = median(Quality.of.Patient.Care.Star.Rating), SD = sd(Quality.of.Patient.Care.Star.Rating))
+  #res_trend
+
+ggplot(HHA_common%>%filter(Year>=year), aes(x = Type.of.Ownership, y = Quality.of.Patient.Care.Star.Rating)) +
+  geom_boxplot() +
+  labs(title = "Quality of Patient Care Star Rating by Ownership Type",
+       x = "Ownership Type",
+       y = "Quality of Patient Care Star Rating",
+       fill = "Type of Ownership") +
+  theme_minimal()
+})
+# HHA_common %>%filter(Year>2015) %>%
+#   group_by(Type.of.Ownership, Year) %>%
+#   summarise(Mean = mean(Quality.of.Patient.Care.Star.Rating), Median = median(Quality.of.Patient.Care.Star.Rating), SD = sd(Quality.of.Patient.Care.Star.Rating))
+
+```
+
+Correlation of Age of HHA
+=====================================  
+
+Row {data-height=500}
+-------------------------------------
+
+
+```{r q5_input}
+inputPanel(
+  sliderInput(inputId = get.q5.id("inputs"), label = "Select Minimum Year Certified", min = HHA_common%>%select(Year.Certified)%>%min(), max = HHA_common%>%select(Year.Certified)%>%max(), value = 2000, step = 1)
+)
+```
+
+
+```{r q5_output}
+
+renderDataTable({
+  year <- input$q5_inputs
+  age.by.certification <- HHA_common%>%filter(Year.Certified>year)%>%select(Age)
+  correlation.output.common(HHA_common%>%filter(Year.Certified>year), age.by.certification$Age)
+})
+
+```
+
+Correlation Risk of Falling
+=====================================  
+
+Row {data-height=500}
+-------------------------------------
+
+
+```{r q6_input}
+
+```
+
+
+```{r q6_output}
+renderDataTable({
+  cor_fall_coef = cor(HHA$Quality.of.Patient.Care.Star.Rating, HHA$How.often.the.home.health.team.checked.patients..risk.of.falling, use = "complete.obs")
+  cor_fall_test = cor.test(HHA$Quality.of.Patient.Care.Star.Rating, HHA$How.often.the.home.health.team.checked.patients..risk.of.falling, method = "pearson")
+  data.table(`Correlation Coefficient` = cor_fall_coef, `P-Value` = cor_fall_test$p.value)
+  
+})
+```

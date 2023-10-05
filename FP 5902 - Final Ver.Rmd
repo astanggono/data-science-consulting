@@ -1,0 +1,546 @@
+---
+title: "Analysis of Home Health Care Agency Quality and Patient Care Outcomes"
+author: "Asta Adhira Anggono, Chang Gao, Kishaye Simone Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r libraries}
+suppressMessages(library(caret))
+suppressMessages(library(corrplot))
+suppressMessages(library(data.table))
+suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
+suppressMessages(library(glmnet))
+suppressMessages(library(MASS))
+suppressMessages(library(mice))
+suppressMessages(library(purrr))
+```
+
+```{r load_data}
+HHA = read.csv("HHA All Providers.csv")
+HHA = HHA[!is.na(HHA$Quality.of.Patient.Care.Star.Rating), ]
+```
+
+```{r clean_data}
+#Create two data frames for further analysis
+#HHA_common is a data frame that contains common and numerical variables (excluding PPR-related variables) from 2015 to 2022
+HHA_common = HHA[, c(1:4, 6:7, 9:21, 23, 26:27, 29, 31:32)]
+
+#HHA_PPR is a data frame that contains common and numerical variables from 2019 to 2022 particularly for PPR-related analysis
+HHA_PPR = HHA[, c(1:4, 6:7, 9:21, 23, 26:27, 29, 31:32, 34, 46:62)]
+HHA_PPR = HHA_PPR[HHA_PPR$Year == 2019 | HHA_PPR$Year == 2020 | HHA_PPR$Year == 2021 | HHA_PPR$Year == 2022, ]
+HHA_PPR = HHA_PPR[!is.na(HHA_PPR$DTC.Observed.Rate), ]
+
+#Data frames below contain results from respective years for detailed analysis
+HHA_15_16 = HHA[HHA$Year == 2015 | HHA$Year == 2016, ][, c(9:33, 35:43)]
+HHA_17_18 = HHA[HHA$Year == 2017 | HHA$Year == 2018, ][, c(9:29, 31:33, 35:38)]
+HHA_19 = HHA[HHA$Year == 2019, ][, c(9:29, 31:38, 44:45, 47:62)]
+HHA_20 = HHA[HHA$Year == 2020, ][, c(9:29, 31:32, 34, 46:62)]
+HHA_21_22 = HHA[HHA$Year == 2021 | HHA$Year == 2022, ][, c(9:21, 23, 26:27, 29, 31:32, 34, 46:62)]
+```
+
+```{r constants}
+#Survey items in 2015 and 2016
+items_2015 = c("Quality.of.Patient.Care.Star.Rating", "How.often.the.home.health.team.began.their.patients..care.in.a.timely.manner", "How.often.the.home.health.team.taught.patients..or.their.family.caregivers..about.their.drugs", "How.often.the.home.health.team.determined.whether.patients.received.a.flu.shot.for.the.current.flu.season", "How.often.the.home.health.team.checked.patients..risk.of.falling", "How.often.patients.got.better.at.walking.or.moving.around", "How.often.the.home.health.team.checked.patients.for.depression", "How.often.the.home.health.team.made.sure.that.their.patients.have.received.a.pneumococcal.vaccine..pneumonia.shot..", "How.often.patients.got.better.at.getting.in.and.out.of.bed", "How.often.patients.got.better.at.bathing", "With.diabetes..how.often.the.home.health.team.got.doctor.s.orders..gave.foot.care..and.taught.patients.about.foot.care", "How.often.patients.got.better.at.taking.their.drugs.correctly.by.mouth", "How.often.the.home.health.team.checked.patients.for.pain", "How.often.patients.had.less.pain.when.moving.around", "How.often.patients..breathing.improved", "How.often.patients..wounds.improved.or.healed.after.an.operation", "How.often.the.home.health.team.treated.their.patients..pain", "How.often.the.home.health.team.treated.heart.failure..weakening.of.the.heart..patients..symptoms", "How.often.the.home.health.team.took.doctor.ordered.action.to.prevent.pressure.sores..bed.sores.", "How.often.the.home.health.team.included.treatments.to.prevent.pressure.sores..bed.sores..in.the.plan.of.care", "How.often.the.home.health.team.checked.patients.for.the.risk.of.developing.pressure.sores..bed.sores." )
+
+#Survey items in 2021 and 2022
+items_2021 = c("Quality.of.Patient.Care.Star.Rating", "How.often.the.home.health.team.began.their.patients..care.in.a.timely.manner", "How.often.the.home.health.team.taught.patients..or.their.family.caregivers..about.their.drugs", "How.often.the.home.health.team.determined.whether.patients.received.a.flu.shot.for.the.current.flu.season", "How.often.patients.got.better.at.walking.or.moving.around", "How.often.patients.got.better.at.getting.in.and.out.of.bed", "How.often.patients.got.better.at.bathing", "How.often.patients.got.better.at.taking.their.drugs.correctly.by.mouth", "How.often.patients.receiving.home.health.care.needed.urgent..unplanned.care.in.the.ER.without.being.admitted", "How.often.home.health.patients.had.to.be.admitted.to.the.hospital", "How.often.physician.recommended.actions.to.address.medication.issues.were.completely.timely", "Changes.in.skin.integrity.post.acute.care..pressure.ulcer.injury", "DTC.Observed.Rate", "DTC.Risk.Standardized.Rate", "PPR.Observed.Rate", "PPR.Risk.Standardized.Rate", "How.much.Medicare.spends.on.an.episode.of.care.at.this.agency..compared.to.Medicare.spending.across.all.agencies.nationally", "No..of.episodes.to.calc.how.much.Medicare.spends.per.episode.of.care.at.agency..compared.to.spending.at.all.agencies..national.")
+```
+
+```{r function}
+# Initialize a list to store the best Type.of.Ownership for each column based on mean and median
+best_performers_mean_2015 = list()
+best_performers_median_2015 = list()
+
+# Loop through each column name and find the Type.of.Ownership with the highest mean and median
+for (col_name in items_2015) {
+  # Calculate mean and median for each Type.of.Ownership
+  result_df = HHA_15_16 %>%
+    group_by(Type.of.Ownership) %>%
+    summarize(mean_value = mean(!!sym(col_name)),
+              median_value = median(!!sym(col_name)))
+  
+  # Find the row with the highest mean_value
+  best_mean_row = result_df[which.max(result_df$mean_value), ]
+  best_mean_row$Performance_Measure = "Mean"
+  best_mean_row$Column_Name = col_name
+  
+  # Find the row with the highest median_value
+  best_median_row = result_df[which.max(result_df$median_value), ]
+  best_median_row$Performance_Measure = "Median"
+  best_median_row$Column_Name = col_name
+  
+  # Store the summary tables in the respective lists
+  best_performers_mean_2015[[col_name]] = best_mean_row
+  best_performers_median_2015[[col_name]] = best_median_row
+}
+
+# Initialize a list to store the best Type.of.Ownership for each column based on mean and median
+best_performers_mean_2021 = list()
+best_performers_median_2021 = list()
+
+# Loop through each column name and find the Type.of.Ownership with the highest mean and median
+for (col_name in items_2021) {
+  # Calculate mean and median for each Type.of.Ownership
+  result_df = HHA_21_22 %>%
+    group_by(Type.of.Ownership) %>%
+    summarize(mean_value = mean(!!sym(col_name)),
+              median_value = median(!!sym(col_name)))
+  
+  # Find the row with the highest mean_value
+  best_mean_row = result_df[which.max(result_df$mean_value), ]
+  best_mean_row$Performance_Measure = "Mean"
+  best_mean_row$Column_Name = col_name
+  
+  # Find the row with the highest median_value
+  best_median_row = result_df[which.max(result_df$median_value), ]
+  best_median_row$Performance_Measure = "Median"
+  best_median_row$Column_Name = col_name
+  
+  # Store the summary tables in the respective lists
+  best_performers_mean_2021[[col_name]] = best_mean_row
+  best_performers_median_2021[[col_name]] = best_median_row
+}
+```
+
+Abstract:
+This paper presents a comprehensive analysis of home health care agencies (HHA) to understand the relationship between their services, ownership types, agency age, and patient care outcomes. A dataset containing information on multiple HHAs from 2015 to 2022 was analyzed. Data preprocessing involved removing missing values in the quality of patient care star rating. Subsequently, two data frames were created for further analysis: HHA_common, containing common and numerical variables, and HHA_PPR, focused on PPR-related analysis. Correlation analysis, regression, and independent t-tests were employed to investigate the research questions.
+
+Introduction:
+Home health care agencies play a crucial role in providing care and support to patients in their homes. The quality of care delivered by these agencies directly impacts patient outcomes and overall health. This study aims to explore the factors influencing the quality of patient care in HHAs, including the correlation between service offerings, ownership types, agency age, and patient care outcomes. Our analysis and the way the report is generated is aimed to be reproducible in nature. This allows for the ABC Health Insurance to upload any data using the same format as the "HHA All Providers.csv" file so they reproduce the results that is current and applicable at that time.  Outlined below is the process in which the report will be generated and how the data is analyzed.   
+
+The dataset was sourced from "HHA All Providers.csv," and rows with missing values in the "Quality.of.Patient.Care.Star.Rating" column were removed. This step ensured the analysis focused on complete and reliable data.  Two data frames, HHA_common and HHA_PPR, were created. HHA_common contained common and numerical variables, while HHA_PPR focused on PPR-related analysis. Missing values in HHA_common and HHA_PPR were imputed using the Multiple Imputation by Chained Equations (MICE) method. This ensured a robust and complete dataset for further analysis. The latter was further filtered for data from 2019 to 2022 and cases with valid DTC observed rates. The correlation between the "Quality.of.Patient.Care.Star.Rating" and other numerical variables in HHA_common and HHA_PPR was explored using correlation heatmaps. The analysis shed light on potential relationships between service offerings and patient care outcomes.
+
+## Specific Questions {.tabset}
+
+This research aims to analyze home health care agencies (HHAs) and investigate various factors influencing the quality of patient care. The research questions explore the relationships between PPR rates, specific services offered, HHA ownership types, agency age, and patient care outcomes.
+
+### Q1
+
+#### Question
+
+What variables are important in influencing the quality rating score?
+
+#### Answer
+
+The first research question seeks to identify the variables that significantly influence the quality rating score in home health care agencies (HHAs). To achieve this, a correlation heatmap is generated using the HHA_common data frame. The numerical variables, excluding the "Quality.of.Patient.Care.Star.Rating" column, are selected and analyzed for their correlation with the quality rating. This analysis aims to uncover key factors that play a crucial role in determining the overall quality of patient care in HHAs. By understanding the important variables that impact the quality rating, healthcare administrators and policymakers can focus their efforts on improving specific aspects of care delivery to enhance patient outcomes and satisfaction. The analysis involves computing the correlation matrix between the "Quality.of.Patient.Care.Star.Rating" and other numerical variables in HHA_common. The correlation heatmap provides a visual representation of the relationships between these variables, where stronger correlations are indicated by distinct color patterns. Through this analysis, the study aims to pinpoint variables that positively or negatively correlate with the quality rating. By identifying these influential factors, HHAs can prioritize resources, develop targeted quality improvement initiatives, and align their practices with evidence-based strategies to achieve higher quality ratings and improved patient care outcomes.
+
+```{r question_1}
+#Generating correlation heat map with common data
+#Identify the numerical columns (excluding the "quality score" column)
+numerical_columns_common = HHA_common[, sapply(HHA_common, is.numeric)]
+#Exclude the "quality score" column from the numerical columns
+numerical_data_common = numerical_columns_common[, !names(numerical_columns_common) %in% "Quality.of.Patient.Care.Star.Rating"]
+#Calculate the correlation matrix between "quality score" and other numerical variables
+cor_matrix_common = suppressMessages(cor(numerical_data_common, HHA_common$Quality.of.Patient.Care.Star.Rating, use = "pairwise.complete.obs"))
+#Create the correlation heat map
+corrplot(cor_matrix_common, method = "color", tl.cex = 0.7)
+
+#Repeat the step to generate correlation heat map with PPR data
+numerical_columns_PPR = HHA_PPR[, sapply(HHA_PPR, is.numeric)]
+numerical_data_PPR = numerical_columns_PPR[, !names(numerical_columns_PPR) %in% "Quality.of.Patient.Care.Star.Rating"]
+cor_matrix_PPR = suppressMessages(cor(numerical_data_PPR, HHA_PPR$Quality.of.Patient.Care.Star.Rating, use = "pairwise.complete.obs"))
+corrplot(cor_matrix_PPR, method = "color", tl.cex = 0.7)
+```
+
+The correlation heatmap generated from the common data reveals the key variables influencing the quality rating score of home health care agencies. Among them, "Year," "CMS Certification Number," and "ZIP" stand out as the top three variables with the highest positive correlation to the quality rating, suggesting that the quality of care improves over time and specific agencies with distinct certifications and locations consistently achieve higher ratings. On the other hand, "How often patients got better at taking their drugs correctly by mouth," "How patients receiving home health care needed urgent unplanned care in the ER without being admitted," and "How often home health patients had to be admitted to the hospital" show weak correlations with the quality rating. These results offer valuable insights for stakeholders, enabling them to focus on critical factors that enhance overall care quality and patient outcomes.
+
+The correlation heatmap for the Preventable Potential Readmission (PPR) data reveals the top three variables strongly influencing the quality rating score: "Year," "CMS Certification Number," and "ZIP." These variables indicate that the quality of patient care consistently improves over time and is associated with specific certifications and geographic locations. Interestingly, these top three variables are also the same as those identified in the Home Health Agency (HHA) data analysis. This consistency across both datasets strengthens the validity of these variables as significant drivers of quality ratings.
+
+On the other hand, the heatmap also highlights the bottom three variables with weak correlations to the quality rating in the PPR data: "PPR Risk Standardized Rate Upper Limit," "How much Medicare spends on an episode of care at this agency compared to Medicare spending across all agencies nationally," and "How much Medicare spends per episode of care at the agency compared to spending at all agencies nationally." These factors may warrant further investigation to understand their impact on patient outcomes and identify potential areas for improvement. Overall, these findings offer valuable insights to stakeholders, enabling them to focus their efforts on crucial aspects that contribute to higher quality patient care and better network management within the home health care setting.
+
+Recommendations:
+
+Quality Rating Metrics: ABC Health Insurance should consider incorporating the identified key variables from the research (e.g., "Year," "CMS Certification Number," and "ZIP") into their quality rating metrics for home health care agencies. These variables have a strong positive correlation with the quality rating, indicating that agencies with certain certifications and locations consistently deliver better care. By using these metrics in their assessment, ABC Health Insurance can incentivize agencies to maintain high standards of care and foster competition among agencies to improve their ratings. Regarding their provider network management, ABC Health Insurance should pay special attention to these variables when managing their provider network. By forming partnerships with HHAs that have high-quality ratings, ABC can ensure that their members receive the best possible care and minimize preventable readmissions, leading to better patient outcomes and cost savings.
+
+### Q2
+
+#### Question
+
+How do the PPR (Preventable Potential Readmission) and DTC rate and the performance of the two figures correlate with the rating of an institution?
+
+#### Answer {.tabset}
+
+##### DTC (Discharge to Community)
+
+```{r question_2a}
+#DTC (Discharge to Community) Observed rate
+cor_dtc_coef = cor(HHA_PPR$Quality.of.Patient.Care.Star.Rating, HHA_PPR$DTC.Observed.Rate, use = "complete.obs")
+cor_dtc_test = cor.test(HHA_PPR$Quality.of.Patient.Care.Star.Rating, HHA_PPR$DTC.Observed.Rate, method = "pearson")
+print(paste("Correlation coefficient:", cor_dtc_coef))
+
+#DTC Performance Categorization
+model_dtc = lm(Quality.of.Patient.Care.Star.Rating ~ DTC.Performance.Categorization, data = HHA_PPR)
+anova_res_dtc = anova(model_dtc)
+print(anova_res_dtc)
+```
+
+##### PPR (Preventable Potential Readmission)
+
+```{r question_2b}
+#PPR (Preventable Potential Readmission) Observed rate
+cor_ppr_coef = cor(HHA_PPR$Quality.of.Patient.Care.Star.Rating, HHA_PPR$PPR.Observed.Rate, use = "complete.obs")
+cor_ppr_test = cor.test(HHA_PPR$Quality.of.Patient.Care.Star.Rating, HHA_PPR$PPR.Observed.Rate, method = "pearson")
+print(paste("Correlation coefficient:", cor_ppr_coef))
+
+#PPR Performance Categorization
+model_ppr = lm(Quality.of.Patient.Care.Star.Rating ~ PPR.Performance.Categorization, data = HHA_PPR)
+anova_res_ppr = anova(model_ppr)
+print(anova_res_ppr)
+```
+
+##### Summary
+
+The second research question focuses on exploring the relationships between two critical figures, the Preventable Potential Readmission (PPR) rate and the Discharge to Community (DTC) rate, and the "Quality.of.Patient.Care.Star.Rating" in home health care agencies. The analysis involves calculating correlation coefficients and p-values to determine the strength and significance of these relationships. Additionally, regression analyses are performed to investigate the impact of DTC and PPR performance categorizations on the "Quality.of.Patient.Care.Star.Rating." Understanding the relationships between these figures and the quality rating is vital for assessing the effectiveness of care processes and interventions in reducing preventable readmissions and improving patient outcomes. The analysis calculates the correlation coefficients between the "Quality.of.Patient.Care.Star.Rating" and the DTC rate as well as the PPR rate in HHA_PPR data frame. The p-values obtained from correlation tests indicate the statistical significance of these relationships. Moreover, regression models are built to explore how DTC and PPR performance categorizations impact the "Quality.of.Patient.Care.Star.Rating." The findings from this analysis will provide insights into the association between these performance measures and patient care quality, which can help HHAs tailor their care plans, interventions, and discharge strategies to reduce readmissions and enhance the overall quality of care. Policymakers and healthcare providers can utilize these insights to develop targeted interventions aimed at improving patient outcomes and optimizing the use of healthcare resources in home health care settings.
+
+The analysis examines the correlation between the PPR (Preventable Potential Readmission) and DTC (Discharge to Community) rates and the quality rating of home health care agencies. The correlation coefficients show a weak positive correlation between DTC performance categorization and the quality rating score (correlation coefficient: `r cor_dtc_coef`). This suggests that agencies with higher DTC performance categorization tend to have slightly higher quality ratings. On the other hand, the correlation between PPR performance categorization and the quality rating score is weak and negative (correlation coefficient: `r cor_ppr_coef`). It indicates that agencies with higher PPR performance categorization may have slightly lower quality ratings. These results provide insights into the relationship between preventable readmissions and discharge practices and overall care quality. Agencies can use this information to tailor interventions and improve care coordination, ultimately enhancing the patient experience and health outcomes.
+
+Recommendations:
+
+ABC Health Insurance should focus on improving Discharge to Community (DTC) rates in home health care agencies to enhance overall care quality and patient outcomes. A weak positive correlation between DTC performance categorization and quality ratings suggests that agencies with higher DTC rates tend to have slightly higher quality ratings. To achieve this ABC Health Insurance should support agencies in enhancing discharge planning by encouraging them to invest in comprehensive discharge planning and care coordination processes. This includes ensuring smooth transitions from hospital to home care, effective communication with other healthcare providers, and patient education on managing their conditions after discharge. ABC can also collaborate with agencies to adopt evidence-based interventions aimed at reducing preventable readmissions. These interventions may include post-discharge follow-ups, medication reconciliation, and patient education on managing chronic conditions.
+
+### Q3
+
+#### Question
+
+Do home health care agencies offering a comprehensive range of services, including physical therapy, occupational therapy, and speech pathology, tend to have higher quality ratings? How does the variation in services offered impact the overall quality of care and network management?
+
+#### Answer {.tabset}
+
+##### Physical Therapy Service
+
+```{r  question_3a}
+physical_y = HHA_common[HHA_common$Offers.Physical.Therapy.Services == 1, ]
+physical_n = HHA_common[HHA_common$Offers.Physical.Therapy.Services == 0, ]
+
+res_physical = t.test(physical_y$Quality.of.Patient.Care.Star.Rating, physical_n$Quality.of.Patient.Care.Star.Rating)
+res_physical
+```
+
+##### Occupational Therapy Service
+
+```{r question_3b}
+occupational_y = HHA_common[HHA_common$Offers.Occupational.Therapy.Services == 1, ]
+occupational_n = HHA_common[HHA_common$Offers.Occupational.Therapy.Services == 0, ]
+
+res_occupational = t.test(occupational_y$Quality.of.Patient.Care.Star.Rating, occupational_n$Quality.of.Patient.Care.Star.Rating)
+res_occupational
+```
+
+##### Speech Pathology Service
+
+```{r question_3c}
+speech_y = HHA_common[HHA_common$Offers.Speech.Pathology.Services == 1, ]
+speech_n = HHA_common[HHA_common$Offers.Speech.Pathology.Services == 0, ]
+
+res_speech = t.test(speech_y$Quality.of.Patient.Care.Star.Rating, speech_n$Quality.of.Patient.Care.Star.Rating)
+res_speech
+```
+
+##### Medical Social Service
+
+```{r  question_3d}
+medical_y = HHA_common[HHA_common$Offers.Medical.Social.Services == 1, ]
+medical_n = HHA_common[HHA_common$Offers.Medical.Social.Services == 0, ]
+
+res_medical = t.test(medical_y$Quality.of.Patient.Care.Star.Rating, medical_n$Quality.of.Patient.Care.Star.Rating)
+res_medical
+```
+
+##### Home Health Aid Service
+
+```{r question_3e}
+homeaid_y = HHA_common[HHA_common$Offers.Home.Health.Aide.Services == 1, ]
+homeaid_n = HHA_common[HHA_common$Offers.Home.Health.Aide.Services == 0, ]
+
+res_homeaid = t.test(homeaid_y$Quality.of.Patient.Care.Star.Rating, homeaid_n$Quality.of.Patient.Care.Star.Rating)
+res_homeaid
+```
+
+##### Summary
+
+The third research question investigates whether home health care agencies offering a comprehensive range of services, including nursing care, physical therapy, occupational therapy, and speech pathology, tend to have higher quality ratings. To explore this, the analysis separates the HHA_common data frame into subsets based on the presence or absence of specific services. Independent t-tests are then performed to compare the quality ratings between agencies that provide each service and those that do not. This analysis aims to determine whether the availability of these services has a significant impact on the overall quality of patient care in HHAs. Understanding the influence of various services on care quality can help agencies tailor their service offerings to meet patients' needs better and optimize care plans to achieve higher quality ratings and improved health outcomes. The analysis focuses on six specific services: nursing care, physical therapy, occupational therapy, speech pathology, medical social services, and home health aide services. Each service is evaluated independently to assess its association with the "Quality.of.Patient.Care.Star.Rating." The t-tests compare the quality ratings between agencies that offer a specific service and those that do not. The results provide valuable insights into the significance of each service in contributing to patient care quality. This information can guide healthcare administrators and policymakers in allocating resources effectively and implementing targeted quality improvement initiatives. By addressing this research question, the study aims to promote evidence-based decision-making in service provision to enhance patient care outcomes and satisfaction.
+
+The analysis investigates the impact of offering comprehensive services, including physical therapy, occupational therapy, speech pathology, medical social service, and home health aid, on home health care agencies' quality ratings. The Welch Two Sample t-tests show that all the services (physical therapy, occupational therapy, speech pathology, medical social service, and home health aid) have statistically significant differences in quality ratings between agencies that offer the service and agencies that do not. Specifically, agencies providing these services tend to have higher quality ratings compared to those that do not. These results highlight the importance of a diverse range of services in ensuring high-quality care delivery. Home health care agencies can leverage this insight to optimize their service offerings, addressing patients' varying needs and improving overall care quality and patient satisfaction.
+
+Recommendations:
+
+ABC Health Insurance should encourage and incentivize home health care agencies to offer a comprehensive range of services, including nursing care, physical therapy, occupational therapy, speech pathology, medical social services, and home health aide services. Providing these services has been associated with higher quality ratings, indicating a positive impact on patient care outcomes and satisfaction. It can start from fostering collaboration between home health care agencies and specialized providers, such as physical therapists, occupational therapists, and speech pathologists. ABC Health Insurance can support these collaborations through provider networks and partnerships, ensuring that patients receive well-rounded care from multidisciplinary teams.ABC can also help provide educational and training support to home health care agencies to enhance their capabilities in delivering a wide range of services. This may involve workshops, webinars, or on-site training to equip agencies with the necessary skills and knowledge. ABC should also promote transparent reporting of service offerings and quality ratings by home health care agencies. This information can help patients make informed decisions about their care and allow ABC Health Insurance to identify high-performing agencies for potential partnerships.
+
+### Q4
+
+#### Question
+
+How does the service quality rating score vary across different types of HHA ownership and how has this been changing over the years?
+
+#### Answer
+
+The fourth research question examines how the quality rating score varies across different types of HHA ownership and how this variation has changed over the years. The analysis utilizes the HHA_common data frame to group agencies by their ownership types and calculate summary statistics such as mean, median, and standard deviation of the quality rating for each ownership type in different years. The study aims to identify any patterns or trends in the quality ratings based on the agency's ownership structure. Understanding how ownership types impact patient care quality is essential for assessing the effectiveness of different management models and identifying areas for improvement in home health care services. The analysis groups data by both ownership type and year to calculate the mean, median, and standard deviation of the "Quality.of.Patient.Care.Star.Rating" for each combination. These summary statistics help visualize the trends and variations in quality ratings over time and across different ownership types. The results are presented through line plots and box plots to illustrate the changes in quality ratings for each ownership type over the years. The findings from this analysis can provide valuable insights into the performance of HHAs under different ownership structures and inform stakeholders about the impact of ownership models on patient care outcomes. Policymakers and healthcare administrators can use these insights to develop targeted strategies to support and regulate home health care agencies effectively, leading to more consistent and high-quality patient care.
+
+```{r question_4}
+res_trend = suppressMessages(HHA_common %>%
+  group_by(Type.of.Ownership, Year) %>%
+  summarise(Mean = mean(Quality.of.Patient.Care.Star.Rating), Median = median(Quality.of.Patient.Care.Star.Rating), SD = sd(Quality.of.Patient.Care.Star.Rating)))
+res_trend
+
+ggplot(res_trend, aes(x = Year, y = Mean, color = Type.of.Ownership, group = Type.of.Ownership)) +
+  geom_line() +
+  labs(title = "Mean Quality of Patient Care Star Rating by Ownership Type over Years",
+       x = "Year",
+       y = "Mean Quality of Patient Care Star Rating",
+       color = "Type of Ownership") +
+  theme_minimal() +
+  ylim(2.75, 3.5)
+
+ggplot(HHA_common, aes(x = Type.of.Ownership, y = Quality.of.Patient.Care.Star.Rating)) +
+  geom_boxplot() +
+  labs(title = "Quality of Patient Care Star Rating by Ownership Type",
+       x = "Ownership Type",
+       y = "Quality of Patient Care Star Rating",
+       fill = "Type of Ownership") +
+  theme_minimal()
+```
+
+The analysis examines the variation in quality rating scores across different  types of home health agency ownership and how this variation has changed over the years. The summary table provides insights into the mean, median, and standard deviation of quality ratings for each ownership type in various years (2015-2022). (Potential Recommendation for future work ) While the summary table presents valuable information on the central tendency and spread of quality ratings, additional statistical analysis or data visualization can help identify trends and patterns. For instance, time series plots or box plots may reveal how quality ratings have evolved over the years for different ownership types. Understanding the relationship between ownership type and care quality can assist policymakers and stakeholders in developing targeted interventions and regulatory policies to enhance care outcomes in specific ownership categories.
+
+Recommendations:
+
+Based on the analysis of how the quality rating score varies across different types of home health agency (HHA) ownership and how this variation has changed over the years, ABC Health Insurance can consider the following recommendations: First, ABC can establish performance benchmarks for each ownership type based on the mean and median quality ratings over the years. By setting clear benchmarks, ABC Health Insurance can assess the performance of HHAs relative to their ownership type and identify agencies that excel in providing high-quality care. This can also serve as a basis for recognizing and rewarding top-performing agencies. Moreover, ABC can support research initiatives focused on understanding how ownership types influence patient care quality in the home health care sector. Collaborate with academic institutions and healthcare research organizations to conduct rigorous studies that can contribute to evidence-based policymaking and best practices in the industry. ABC should also work with regulatory authorities to ensure that policies and regulations align with the varying needs and characteristics of different ownership types. This alignment can create an enabling environment for HHAs to thrive and continuously improve care quality.
+
+### Q5
+
+#### Question
+
+Is there a correlation between the age of home healthcare agencies and the quality of patient care they provide? How do the agency's years of certification contribute to this relationship? 
+
+#### Answer
+
+The fifth research question investigates the correlation between the age of home healthcare agencies and the quality of patient care they provide. The analysis calculates the correlation coefficient and assesses its significance using the cor.test function. By understanding the relationship between agency age and the "Quality.of.Patient.Care.Star.Rating," the study aims to determine whether the age of an agency influences the quality of care delivered to patients. This analysis is crucial for identifying potential trends or patterns related to the longevity of agencies and their care performance. The findings can help healthcare administrators and policymakers make informed decisions about the accreditation and certification processes for new agencies and guide continuous quality improvement efforts for established ones. The analysis calculates the correlation coefficient between the "Quality.of.Patient.Care.Star.Rating" and the age of home healthcare agencies using the cor function. The significance of this correlation is assessed with the cor.test function. The obtained correlation coefficient and p-value provide insights into the strength and statistical significance of the relationship. This information can help identify whether there is a meaningful association between agency age and the quality rating. Understanding this relationship can assist in designing strategies to ensure that new agencies meet quality standards and that older agencies continue to deliver high-quality care. Policymakers can utilize the findings to develop policies and guidelines that support both new and established agencies in maintaining and improving the quality of patient care in home health care settings.
+
+```{r question_5}
+#Assess the significance of the correlation coefficient
+cor_age_test = cor.test(HHA_common$Quality.of.Patient.Care.Star.Rating, HHA_common$Age, method = "pearson")
+cor_age_coef = cor(HHA_common$Quality.of.Patient.Care.Star.Rating, HHA_common$Age, use = "complete.obs")
+print(paste("Correlation coefficient:", cor_age_coef))
+print(paste("P-value:", cor_age_test$p.value))
+```
+
+The analysis explores the correlation between the age of home healthcare agencies and the quality of patient care they provide. The correlation coefficient of `r cor_age_coef` suggests a weak positive correlation between agency age and quality rating. The low correlation indicates that the age of an agency may have limited influence on care quality. However, the p-value is highly significant (p-value < 0.001), indicating that the correlation is statistically significant despite being weak. These findings imply that while agency age might have some impact on care quality, it is not a strong predictor. Other factors, such as the agency's management practices, staffing, and ongoing quality improvement initiatives, may play a more substantial role in determining care quality. Healthcare administrators can use this insight to focus on these critical factors rather than relying solely on the agency's age when evaluating and improving care quality.
+
+Recommendations:
+
+Based on the analysis of the correlation between the age of home healthcare agencies and the quality of patient care they provide, ABC can first implement a system for ongoing monitoring and evaluation of care quality in all agencies, with a focus on key performance indicators related to patient outcomes, safety, and satisfaction. This monitoring can help identify agencies that may require additional support and interventions, regardless of their age. They can also facilitate benchmarking exercises and platforms for agencies to share best practices. Encourage collaboration and knowledge exchange among agencies, regardless of their age, to foster innovation and improvement in care delivery. Especially for new agencies, it is good to offer targeted support and guidance during their initial years of operation. This support can include mentorship programs, technical assistance, or even access to resources that will aid in achieving and maintaining quality standards. It is also a good idea to collaborate with accreditation bodies to ensure that the accreditation process considers both the age of the agency and other critical quality indicators. This can lead to a more comprehensive assessment of agency performance.
+
+### Q6
+
+#### Question
+
+How does the practice of “How frequently do home health care agencies assess and address the risk of falling among their patients” impact patient outcomes and overall quality of care?
+
+#### Answer
+
+The sixth research question explores the impact of the frequency of assessing and addressing the risk of falling among patients on patient outcomes and the overall quality of care in home health care agencies. The analysis calculates the correlation coefficient and p-value to determine the strength and significance of the relationship between the frequency of risk assessment and the "Quality.of.Patient.Care.Star.Rating." This study aims to identify whether more frequent assessments of fall risk are associated with better patient outcomes and higher care quality. Understanding this relationship can assist in developing evidence-based fall prevention practices and interventions to enhance patient safety and care quality in home health care settings. The analysis calculates the correlation coefficient between the "Quality.of.Patient.Care.Star.Rating" and the frequency of assessing and addressing the risk of falling among patients using the cor function. The statistical significance of this relationship is assessed with the cor.test function, providing insights into whether the correlation is meaningful. The results from this analysis can inform healthcare providers and administrators about the impact of fall prevention practices on patient care quality. Understanding this relationship can guide the development and implementation of fall prevention programs and interventions in home health care agencies, ultimately leading to improved patient outcomes and enhanced overall care quality. Policymakers can use these insights to establish guidelines and regulations focused on fall prevention in home health care settings, promoting safer care environments and better patient experiences.
+
+```{r question_6}
+cor_fall_coef = cor(HHA$Quality.of.Patient.Care.Star.Rating, HHA$How.often.the.home.health.team.checked.patients..risk.of.falling, use = "complete.obs")
+cor_fall_test = cor.test(HHA$Quality.of.Patient.Care.Star.Rating, HHA$How.often.the.home.health.team.checked.patients..risk.of.falling, method = "pearson")
+print(paste("Correlation coefficient:", cor_fall_coef))
+print(paste("P-value:", cor_fall_test$p.value))
+```
+
+The analysis investigates the impact of how frequently home health care agencies assess and address the risk of falling among their patients on patient outcomes and overall care quality. The correlation coefficient of `r cor_fall_coef` indicates a weak positive correlation between the frequency of risk assessment and addressing falls and the quality rating score. Despite the weak correlation, the highly significant p-value (p-value < 0.001) indicates that this relationship is statistically significant. While the correlation suggests that more frequent risk assessment and addressing falls may lead to better quality ratings, it is essential to consider other factors and conduct further analysis to identify potential confounding variables. Healthcare administrators can utilize this insight to emphasize fall risk assessment and prevention strategies, which may contribute to improved patient safety and care quality.
+
+Recommendations:
+
+Based on the analysis of the impact of the frequency of assessing and addressing the risk of falling among patients on patient outcomes and the overall quality of care in home health care agencies, ABC can provide resources for fall prevention initiatives. Given the significance of fall prevention in enhancing patient safety and care quality, ABC can allocate resources to support home health care agencies' fall prevention initiatives. This could include funding for training, education, and technology adoption related to fall risk assessments and interventions. ABC can consider offering performance-based contracts to home health care agencies, where reimbursement is tied to specific quality metrics and patient outcomes. This approach aligns the financial incentives of the agencies with ABC’s  goals of providing high-quality, cost-effective care.
+
+### Independent Analysis 1
+
+#### Question
+
+What are the top-five states with the most HHAs and how have this been changing over the years?
+
+#### Answer
+
+The first independent analysis aims to identify the top five states with the most home health agencies (HHAs) and explore how this distribution has changed over the years. To achieve this, the analysis uses the HHA data frame and subsets the data for each year of interest. The data for the years 2015 and 2016 are combined into the HHA_15_16 data frame, and the analysis is performed for each year independently. The study aggregates the number of HHAs for each state and year, and then selects the top five states based on the highest counts. Through this analysis, the research seeks to understand the geographic distribution of HHAs and how it has evolved over the years, providing insights for healthcare administrators and policymakers to focus their efforts in regions with the highest demand for home health care services. The analysis starts by subsetting the data for each year of interest, creating data frames for 2015-2016, 2017-2018, 2019, 2020, and 2021-2022. For each year's data frame, the count of HHAs is calculated for each state. The states with the highest counts are identified and visualized using a bar plot, showing the top five states for each year. The bar plot displays the change in the top five states over time, allowing stakeholders to observe shifts in the distribution of HHAs across states. This information can be valuable for resource allocation and strategic planning to address the evolving healthcare needs of different regions.
+
+```{r question_7}
+top_five_states = suppressMessages(HHA %>%
+  group_by(Year, State) %>%
+  count() %>%
+  arrange(Year, desc(n)) %>%
+  group_by(Year) %>%
+  top_n(n = 5))
+
+res1 = top_five_states[1, 3]
+res2 = top_five_states[2, 3]
+res3 = top_five_states[3, 3]
+
+ggplot(top_five_states, aes(x = n, y = Year, fill = State)) +
+  geom_bar(stat = "identity", position = "dodge", orientation = "y") +
+  labs(title = "Top Five States by Count for Each Year",
+       x = "Count",
+       y = "Year",
+       fill = "State") +
+  theme_minimal()
+```
+
+The analysis examines the top-five states with the highest number of Home Health Agencies (HHAs) and how this distribution has evolved over the years. The bar plot visualization demonstrates the states with the most HHAs each year. In 2015, Texas (TX) ranked first with `r res1` HHAs, followed by California (CA) with `r res2` HHAs, and Florida (FL) with `r res3` HHAs. The subsequent years show a similar pattern, where Texas consistently maintains the highest number of HHAs, followed by California and Florida, though the specific counts may vary. The insights drawn from this analysis are twofold: First, Texas, California, and Florida are the dominant states in terms of the number of HHAs, indicating a high demand for home health care services in these regions. Second, the relatively consistent rankings of these states over the years suggest that the distribution of HHAs has remained relatively stable, indicating the continued importance of these states in the home health care sector.
+
+Additionally, it is interesting to note that California takes the top spot in 2022, surpassing Texas, which ranked second in that year. This shift in ranking may reflect changing trends in home health care utilization or the emergence of new opportunities in California.Overall, this analysis provides valuable information for policymakers, healthcare administrators, and investors, allowing them to understand the geographical distribution of HHAs and identify potential areas for expansion or resource allocation in the home health care industry.
+
+Recommendations:
+
+ABC company can strategically expand its network of home health care providers in states with consistently high numbers of HHAs, such as Texas, California, and Florida. By establishing strong partnerships with top-performing HHAs in these states, ABC can ensure access to high-quality care for its members and potentially negotiate favorable reimbursement rates. ABC can also allocate resources, such as marketing efforts and provider support, to focus on these states to capture a larger share of the home health care market. To attract and retain members in states with high HHA counts, ABC can engage in regional outreach and education initiatives. Educating potential members about the benefits of home health care and the availability of quality providers in their area can enhance enrollment rates. Moreover, partnering with state and local healthcare authorities can provide ABC with valuable information on regional healthcare trends and regulatory changes that may impact home health care services. Such collaboration can help ABC adapt its offerings and policies to align with regional needs.
+
+### Independent Analysis 2
+
+#### Question
+
+For different types of ownership of HHAs, what are their respective specializations?
+
+#### Answer {.tabset}
+
+##### Results from 2015-2016
+
+```{r question_8a}
+# Combine all the mean-based summary tables into a single final summary table
+final_summary_table_mean = do.call(rbind, best_performers_mean_2015)
+# Combine all the median-based summary tables into a single final summary table
+final_summary_table_median = do.call(rbind, best_performers_median_2015)
+# Print the final mean-based summary table
+print(final_summary_table_mean)
+# Print the final median-based summary table
+print(final_summary_table_median)
+```
+
+##### Results from 2021-2022
+
+```{r question_8b}
+# Combine all the mean-based summary tables into a single final summary table
+final_summary_table_mean = do.call(rbind, best_performers_mean_2021)
+# Combine all the median-based summary tables into a single final summary table
+final_summary_table_median = do.call(rbind, best_performers_median_2021)
+# Print the final mean-based summary table
+print(final_summary_table_mean)
+# Print the final median-based summary table
+print(final_summary_table_median)
+```
+
+##### Summary
+
+```{r}
+res4 = final_summary_table_mean[1, 2]
+res5 = final_summary_table_mean[4, 2]
+res6 = final_summary_table_mean[2, 2]
+res7 = final_summary_table_mean[5, 2]
+res8 = final_summary_table_mean[1, 3]
+res9 = final_summary_table_mean[2, 3]
+res10 = final_summary_table_mean[3, 2]
+```
+
+The second independent analysis investigates the specialization areas of home health care agencies based on their types of ownership. To accomplish this, the analysis uses data for the years 2015 and 2021-2022, separately. The focus is on the columns representing various performance measures related to patient care quality. By comparing the mean and median performance of each type of ownership for each performance measure, the study aims to identify the types of ownership that excel in different care aspects. This analysis can help healthcare policymakers and administrators understand the strengths and weaknesses of different ownership models and guide decisions regarding ownership structures and care quality improvement initiatives.  The analysis is conducted separately for the years 2015 and 2021-2022. For each year's data, the mean and median values of performance measures are calculated for each type of ownership. The types of ownership with the highest mean and median values for each performance measure are identified. This process is performed for various performance measures, allowing for a comprehensive comparison of ownership types' specializations. The results are presented in summary tables, providing insights into the areas in which each type of ownership excels. Healthcare administrators and policymakers can utilize this information to support and incentivize ownership structures that align with specific performance goals, fostering the delivery of high-quality care.
+
+In the analysis of different types of ownership for home health care agencies (HHA) in 2015, the top three variables with the highest mean values across ownership types were "Quality of Patient Care Star Rating," "How often the home health team began their patients' care in a timely manner," and "How often the home health team taught patients or their family caregivers about their drugs." These findings suggest that addressing timely care initiation and drug education can significantly impact the overall quality of care provided by home health care agencies. However, when comparing mean and median values, it was observed that some variables had lower median values than the mean, indicating possible skewness or outliers in the data. This insight is valuable for understanding the distribution of performance measures and identifying areas that may require improvement. Overall, the analysis provides essential insights into the key factors influencing patient care quality and highlights the need for targeted efforts to improve certain aspects of care across different types of home health care agencies. 
+
+The analysis explored different types of ownership for home health care agencies in 2021, focusing on performance measures related to patient care quality. The mean-based summary table revealed that proprietary agencies had the highest mean quality rating (`r res4`), while non-profit agencies had a lower mean rating (`r res5`) for "How often patients got better at bathing." Additionally, proprietary agencies had the highest mean score (`r res6`) for "How often the home health team taught patients or their family caregivers about drugs," compared to non-profit agencies with a mean score of `r res7`. The median-based summary table showed similar trends, with proprietary agencies having the highest median quality rating (`r res8`) and the highest median score (`r res9`) for educating patients about drugs. Meanwhile, public agencies had a higher median rating (`r res10`) for "How often the home health team began their patients' care in a timely manner." The analysis emphasizes the variation in performance measures across ownership types and highlights potential areas for improvement in home health care services.
+
+Recommendations:
+
+Based on the insights from the second independent analysis regarding the specialization areas of home health care agencies based on their types of ownership in 2015 and 2021-2022, ABC can incentivize high-quality drug education. Based on the analysis, proprietary agencies consistently demonstrated higher mean and median scores for "How often the home health team taught patients or their family caregivers about drugs." ABC can incentivize and support all types of agencies to focus on patient education, particularly concerning medication management. This can lead to better patient adherence to prescribed medications and improved health outcomes. Moreover, The analysis highlighted that timely care initiation significantly impacted the overall quality of care in home health agencies in 2015. ABC  can collaborate with agencies to implement strategies that ensure timely care initiation, such as efficient scheduling and resource allocation, to enhance patient satisfaction and outcomes. Lastly,  Establishing strong relationships with agencies can also foster open communication and collaboration for mutual improvement.
+
+### Independent Analysis 3
+
+#### Question
+
+How have influencing factors been changing from 2015 to 2022? A good way to look into this question might be to compare these factors from 2015 to 2022
+
+#### Answer {.tabset}
+
+##### Results from 2015-2016
+
+```{r question_9a}
+set.seed(1031)
+imputed_HHA_15_16 = suppressMessages(mice(HHA_15_16, m = 5, method = "cart", printFlag = FALSE))
+HHA_15_16 = suppressMessages(complete(imputed_HHA_15_16))
+#Use stepwise regression models to conduct feature selection
+start_mod_15_16 = lm(Quality.of.Patient.Care.Star.Rating ~ 1, data = HHA_15_16)
+empty_mod_15_16 = lm(Quality.of.Patient.Care.Star.Rating ~ 1, data = HHA_15_16)
+full_mod_15_16 = lm(Quality.of.Patient.Care.Star.Rating ~ ., data = HHA_15_16)
+hybridStepwise_15_16 = step(start_mod_15_16,
+                      scope = list(upper = full_mod_15_16, lower = empty_mod_15_16),
+                      direction = 'both', trace = 0)
+
+summary(hybridStepwise_15_16)
+
+hybridStepwise_15_16$anova %>% 
+  mutate(step_number = as.integer(rownames(hybridStepwise_15_16$anova)) - 1) %>%
+  mutate(Step = as.character(Step))%>%
+  ggplot(aes(x = reorder(Step, X = step_number), y = AIC))+
+  geom_point(color = 'darkgreen', size = 1) + 
+  scale_x_discrete(name = 'Variable Added or Dropped')+
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 4))
+```
+
+##### Results from 2021-2022
+
+```{r question_9b}
+set.seed(1031)
+imputed_HHA_21_22 = suppressMessages(mice(HHA_21_22, m = 5, method = "cart", printFlag = FALSE))
+HHA_21_22 = suppressMessages(complete(imputed_HHA_21_22))
+#Use stepwise regression models to conduct feature selection
+start_mod_21_22 = lm(Quality.of.Patient.Care.Star.Rating ~ 1, data = HHA_21_22)
+empty_mod_21_22 = lm(Quality.of.Patient.Care.Star.Rating ~ 1, data = HHA_21_22)
+full_mod_21_22 = lm(Quality.of.Patient.Care.Star.Rating ~ ., data = HHA_21_22)
+hybridStepwise_21_22 = step(start_mod_21_22,
+                      scope = list(upper = full_mod_21_22, lower = empty_mod_21_22),
+                      direction = 'both', trace = 0)
+
+summary(hybridStepwise_21_22)
+
+hybridStepwise_21_22$anova %>% 
+  mutate(step_number = as.integer(rownames(hybridStepwise_21_22$anova)) - 1) %>%
+  mutate(Step = as.character(Step))%>%
+  ggplot(aes(x = reorder(Step, X = step_number), y = AIC))+
+  geom_point(color = 'darkgreen', size = 1) + 
+  scale_x_discrete(name = 'Variable Added or Dropped')+
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 4))
+```
+
+##### Summary
+
+The third independent analysis examines how the influencing factors on home health agency quality rating have changed from 2015 to 2022. The analysis focuses on the data from 2015-2016 and 2021-2022. The primary objective is to identify changes in the factors that contribute significantly to the "Quality.of.Patient.Care.Star.Rating" over these two periods. By conducting stepwise regression, the study can identify the most influential factors for each time period. Understanding the variations in these factors can help healthcare administrators and policymakers target improvement efforts effectively, adapt policies, and address evolving challenges in home health care. For each time period (2015-2016 and 2021-2022), the data is imputed to handle any missing values. Stepwise regression models are then performed on the imputed data to conduct feature selection. The stepwise regression process identifies the most influential factors related to the "Quality.of.Patient.Care.Star.Rating" for each time period. The selected factors are ranked based on their contribution to the quality rating. By comparing the influential factors from 2015-2016 to 2021-2022, the analysis reveals any changes in the factors driving care quality over time. This information can guide stakeholders in devising targeted strategies to improve care quality and adapt to the evolving landscape of home health care.
+
+From the graph, it is evident that the top three variables with the best AIC values are:
+
+•	Years Certified: This variable seems to have the most significant impact on the Quality of Patient Care Star Rating, as indicated by the lowest AIC value. The negative AIC value suggests that this variable provides a substantial improvement in model fit and predictive power, making it a crucial factor in determining the rating.
+•	How often the home health team checked patients for the risk of falling: This variable also shows a negative AIC value, indicating its importance in predicting the patient care rating. Regular assessments for fall risk may contribute significantly to improving patient safety and quality of care.
+•	Offers physical therapy services: This variable has a negative AIC value, suggesting that the presence of physical therapy services positively influences the patient care rating. This highlights the importance of providing comprehensive care, including rehabilitation services.
+
+On the other hand, the three variables with the inferior AIC values compared to others are:
+
+•	How often patients got better at bathing: Despite having a negative AIC value, this variable might be less impactful in comparison to others in predicting the patient care rating. While it still contributes to model fit, its effect might be relatively weaker compared to the top three variables.
+•	How often patients had less pain when moving around: Like the previous variable, this one also has a negative AIC value but may not carry as much weight in predicting the patient care rating compared to the top three variables.
+•	How health teams determined whether patients received a flu shot for the current flu season: Though still contributing to the model's fit, this variable might have less influence on the patient care rating compared to the top three variables.
+
+These variables have the highest AIC values, suggesting that they might not be the most relevant or significant predictors for the "Quality of Patient Care Star Rating" in the given context. A higher AIC value typically indicates a less preferred model, and in this case, these variables might not be strong predictors or might even introduce unnecessary complexity to the model.
+
+The results shed the following insights gained from the stepwise regression model:
+
+•	Identifying important predictors: The model helps identify which variables have the most impact on the "Quality of Patient Care Star Rating." Clients can focus on improving or addressing these significant predictors to enhance patient care quality.
+•	Removing irrelevant variables: The model identifies variables that are less relevant to the outcome, which can save resources and simplify data collection efforts by focusing on the most critical variables.
+•	Model interpretability: By selecting a parsimonious model, the stepwise regression makes the final model more interpretable, allowing clients to understand the factors affecting the outcome more easily.
+•	Predictive power: A model with well-selected predictors tends to have better predictive power, meaning it can provide more accurate predictions for future cases.
+
+In summary, the analysis suggests that the years certified, frequency of fall risk assessments, and offering physical therapy services are the most crucial factors affecting the Quality of Patient Care Star Rating. On the other hand, the variables related to patients' improvements in bathing, pain when moving, and flu shot administration may have lesser influence in comparison. It is essential to consider these insights when making decisions about healthcare service improvements and resource allocation to enhance patient care quality and outcomes.
+
+Recommendations:
+
+The analysis indicates that "Years Certified" has the most significant impact on the "Quality of Patient Care Star Rating" over time. ABC can encourage and support home health agencies with longer certification history, as they may have accumulated experience and knowledge that positively influence patient care quality. The presence of physical therapy services has been identified as a significant predictor of the patient care rating. ABC can incentivize agencies to offer comprehensive care, including rehabilitation services, as they contribute positively to patient outcomes and overall care quality. ABC can collaborate with agencies to review their practices related to variables that are less impactful and identify opportunities for improvement. While variables such as "How often patients got better at bathing," "How often patients had less pain when moving around," and "How health teams determined whether patients received a flu shot" are still relevant, their influence on the patient care rating may be less significant. Lastly, collaborative data analysis between the ABC  and home health agencies can provide valuable insights into the factors driving care quality. By sharing and analyzing data together, both parties can gain a deeper understanding of the drivers of patient outcomes and work together to implement targeted improvement strategies.
